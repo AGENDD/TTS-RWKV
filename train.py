@@ -10,11 +10,14 @@ from accelerate import Accelerator
 from src.rwkv7 import RWKV7
 from src.dataset import MyDataset
 
-######### build model #################
-model = RWKV7(text_vocab=128, audio_vocab=8192 + 1, dim=128, n_blocks=5).cuda()
-# model = torch.nn.DataParallel(model)  # 添加这一行以支持多卡训练
-
 def load_latest_checkpoint(model, checkpoint_dir):
+    """
+    Load the latest checkpoint for the model from the specified directory.
+    
+    Args:
+        model: The model to load the checkpoint into
+        checkpoint_dir: Directory containing checkpoint files (.pt)
+    """
     checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pt')]
     if not checkpoint_files:
         print("No checkpoint files found in the directory.")
@@ -24,31 +27,50 @@ def load_latest_checkpoint(model, checkpoint_dir):
     model.load_state_dict(torch.load(checkpoint_path))
     print(f"Loaded checkpoint: {checkpoint_path}")
 
-checkpoint_dir = "./checkpoints"
-load_latest_checkpoint(model, checkpoint_dir)
+def initialize_model(checkpoint_dir):
+    """
+    Initialize the RWKV7 model and load the latest checkpoint.
+    
+    Args:
+        checkpoint_dir: Directory containing checkpoint files
+    
+    Returns:
+        The initialized model
+    """
+    # Initialize model
+    model = RWKV7(text_vocab=128, audio_vocab=8192 + 1, dim=128, n_blocks=5).cuda()
+    
+    # Load latest checkpoint
+    load_latest_checkpoint(model, checkpoint_dir)
+    
+    # Print model statistics
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model total parameters: {total_params}")
+    print(f"Model trainable parameters: {trainable_params}")
+    
+    return model
 
-# 打印模型总体参数量
-total_params = sum(p.numel() for p in model.parameters())
-print(f"Model total parameters: {total_params}")
-
-# 打印训练参数量和训练参数名字
-trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-trainable_param_names = [name for name, p in model.named_parameters() if p.requires_grad]
-print(f"Model train parameters: {trainable_params}")
-# print(f"训练参数名字: {trainable_param_names}")
-
-######### build dataloader #################
 def collate_fn(batch):
+    """
+    Custom collate function for DataLoader to handle variable-length sequences.
+    
+    Args:
+        batch: A batch of sequences
+        
+    Returns:
+        Tuple of (input_ids, targets, loss_masks)
+    """
     padding_token = 8192
-    max_length = max(len(seq) for seq in batch) - 1  # 最大长度，不包括最后一个token
+    max_length = max(len(seq) for seq in batch) - 1  # Max length excluding the last token
 
     input_ids = []
     targets = []
     loss_masks = []
 
     for seq in batch:
-        input_seq = list(seq[:-1])  # 输入序列，不包括最后一个token
-        target_seq = list(seq[1:])  # 目标序列，从第二个token开始
+        input_seq = list(seq[:-1])  # Input sequence, excluding the last token
+        target_seq = list(seq[1:])  # Target sequence, starting from the second token
         input_padding = [padding_token] * (max_length - len(input_seq))
         target_padding = [padding_token] * (max_length - len(target_seq))
         mask_padding = [0] * (max_length - len(input_seq))
@@ -59,57 +81,122 @@ def collate_fn(batch):
 
     return torch.stack(input_ids, dim=0), torch.stack(targets, dim=0), torch.stack(loss_masks, dim=0)
 
-dataset = load_dataset("JerryAGENDD/JLSpeech_tokenized", cache_dir="../temp_datasets")['train']
-dataloader = MyDataset(hf_dataset=dataset, train_type='pretrain')
-dataloader = DataLoader(dataloader, batch_size=128, shuffle=True, collate_fn=collate_fn)
-# print(dataset)
-
-######### configuration #################
-accelerator = Accelerator()
-optimizer = torch.optim.Adam(model.parameters(), lr=5e-6)
-model, dataloader, optimizer = accelerator.prepare(model, dataloader, optimizer)
-
-######### training #################
-num_epochs = 4000
-output_dir = "./checkpoints"
-os.makedirs(output_dir, exist_ok=True)
-
-wandb.init(project="TTS")
-
-
-model.train()
-for epoch in tqdm(range(num_epochs)):
-    for batch in tqdm(dataloader, leave=False):
-        input_ids, targets, loss_masks = batch
-        input_ids = input_ids.long().to('cuda')
-        targets = targets.long().to('cuda')
-        loss_masks = loss_masks.to('cuda')
-
-        # 前向传播
-        outputs = model(None, input_ids)
-        # 计算损失
-        criterion = torch.nn.CrossEntropyLoss(reduction='none')
-        loss = criterion(outputs.view(-1, outputs.size(-1)), targets.view(-1))
-        # 将loss_masks应用于损失
-        loss = loss.view(targets.size()) * loss_masks
-        loss = loss.sum() / loss_masks.sum()  # 计算平均损失
-
-        # tqdm.write(str(loss))
-        wandb.log({"loss": loss.item()})
-        # 反向传播和优化
-        optimizer.zero_grad()
-        accelerator.backward(loss)
-        optimizer.step()
-
+def prepare_dataloader(batch_size=128):
+    """
+    Prepare dataset and dataloader.
     
-    # 删除目标路径下所有pt文件
+    Args:
+        batch_size: Batch size for training
+        
+    Returns:
+        DataLoader for training
+    """
+    # Load dataset
+    dataset = load_dataset("JerryAGENDD/JLSpeech_tokenized", cache_dir="../temp_datasets")['train']
+    dataset = MyDataset(hf_dataset=dataset, train_type='pretrain')
+    
+    # Create dataloader
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        collate_fn=collate_fn
+    )
+    
+    return dataloader
+
+def train(model, dataloader, num_epochs=4000, output_dir="./checkpoints", learning_rate=5e-6):
+    """
+    Train the model.
+    
+    Args:
+        model: The model to train
+        dataloader: DataLoader for training data
+        num_epochs: Number of training epochs
+        output_dir: Directory to save checkpoints
+        learning_rate: Learning rate for optimizer
+    """
+    # Set up accelerator and optimizer
+    accelerator = Accelerator()
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    model, dataloader, optimizer = accelerator.prepare(model, dataloader, optimizer)
+    
+    # Initialize wandb
+    wandb.init(project="TTS")
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Training loop
+    model.train()
+    for epoch in tqdm(range(num_epochs)):
+        for batch in tqdm(dataloader, leave=False):
+            input_ids, targets, loss_masks = batch
+            input_ids = input_ids.long().to('cuda')
+            targets = targets.long().to('cuda')
+            loss_masks = loss_masks.to('cuda')
+
+            # Forward pass
+            outputs = model(None, input_ids)
+            
+            # Calculate loss
+            criterion = torch.nn.CrossEntropyLoss(reduction='none')
+            loss = criterion(outputs.view(-1, outputs.size(-1)), targets.view(-1))
+            # Apply loss masks
+            loss = loss.view(targets.size()) * loss_masks
+            loss = loss.sum() / loss_masks.sum()  # Calculate average loss
+
+            # Log to wandb
+            wandb.log({"loss": loss.item()})
+            
+            # Backward pass and optimization
+            optimizer.zero_grad()
+            accelerator.backward(loss)
+            optimizer.step()
+
+        # Save checkpoint at the end of each epoch
+        save_checkpoint(model, output_dir, epoch)
+    
+    # Finish the wandb run
+    wandb.finish()
+
+def save_checkpoint(model, output_dir, epoch):
+    """
+    Save a model checkpoint.
+    
+    Args:
+        model: The model to save
+        output_dir: Directory to save the checkpoint
+        epoch: Current epoch number
+    """
+    # Delete all existing checkpoint files
     pt_files = glob.glob(os.path.join(output_dir, "*.pt"))
     for pt_file in pt_files:
         os.remove(pt_file)
 
-    # 保存当前检查点
+    # Save current checkpoint
     checkpoint_path = os.path.join(output_dir, f"checkpoint_epoch_{epoch + 1}.pt")
     torch.save(model.state_dict(), checkpoint_path)
+    print(f"Saved checkpoint to {checkpoint_path}")
 
-# Finish the wandb run
-wandb.finish()
+def main():
+    """
+    Main function to run the training process.
+    """
+    # Configuration
+    checkpoint_dir = "./checkpoints"
+    batch_size = 128
+    num_epochs = 4000
+    learning_rate = 5e-6
+    
+    # Initialize model
+    model = initialize_model(checkpoint_dir)
+    
+    # Prepare dataloader
+    dataloader = prepare_dataloader(batch_size)
+    
+    # Train model
+    train(model, dataloader, num_epochs, checkpoint_dir, learning_rate)
+
+if __name__ == "__main__":
+    main()

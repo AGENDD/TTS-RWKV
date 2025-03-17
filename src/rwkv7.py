@@ -64,12 +64,17 @@ class RWKV7(nn.Module):
 
     def forward(self, text, audio):
         if(text is None and audio is not None):         #pretrain
-            audio = self.audio_embed(audio)
-            x = audio
+            audio_emb = self.audio_embed(audio)
+            x = audio_emb
         elif(text is not None and audio is not None):   #sft or inference
-            ...
+            audio_emb = self.audio_embed(audio)
+            text_emb = self.text_embed(text)
+            # concat
+            x = torch.cat((text, audio), dim=1)
         elif(text is not None and audio is None):       #inference
-            ...
+            text_emb = self.text_embed(text)
+            x = text_emb
+
         
         x = self.norm_in(x)
         v_first = None
