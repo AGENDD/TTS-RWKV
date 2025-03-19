@@ -62,23 +62,78 @@ class RWKV7(nn.Module):
         self.norm_in = nn.LayerNorm(dim)
         self.norm_out = nn.LayerNorm(dim)
 
-    def forward(self, text, audio):
+    def forward(self, text,text_attention_mask, audio):
         if(text is None and audio is not None):         #pretrain
-            audio_emb = self.audio_embed(audio)
-            x = audio_emb
+            audio = self.audio_embed(audio)
+            x = audio
         elif(text is not None and audio is not None):   #sft or inference
-            audio_emb = self.audio_embed(audio)
-            text_emb = self.text_embed(text)
-            # concat
-            x = torch.cat((text, audio), dim=1)
+            text = self.text_embed(text)
+            audio = self.audio_embed(audio)
+            
+            text_list = []
+            audio_list = []
+            
+            # Iterate over the batch dimension
+            for i in range(text.shape[0]):
+                # Mask the text based on text_attention_mask
+                masked_text = text[i][text_attention_mask[i] == 1]
+                text_list.append(masked_text)
+                
+                # Get the corresponding audio segment
+                audio_segment = audio[i]
+                audio_list.append(audio_segment)
+                
+            tensor_list = []
+            max_len = max([len(x)+len(y) for x, y in zip(text_list, audio_list)])
+            
+            for i in range(len(text_list)):
+                combine_tensor = torch.cat((text_list[i], audio_list[i]), dim=0)
+                if combine_tensor.shape[0] < max_len:
+                    padding = audio_list[i][-1:].expand(max_len - combine_tensor.shape[0], -1)
+                    combine_tensor = torch.cat((combine_tensor, padding), dim=0)
+                tensor_list.append(combine_tensor)
+                    
+            x = torch.stack(tensor_list,dim=0)
+            
         elif(text is not None and audio is None):       #inference
-            text_emb = self.text_embed(text)
-            x = text_emb
-
-        
+            x = self.text_embed(text)
+            
         x = self.norm_in(x)
         v_first = None
         for block in self.blocks:
             x, v_first = block(x, v_first)
             
         return self.lmhead(self.norm_out(x))
+    
+    def generate(self, audio, text, MAX_LENGTH):
+        text = self.text_embed(text)  # 修正这里
+
+        tokens = []
+        for i in range(MAX_LENGTH):
+            if audio is None:
+                x = text
+            else:
+                audio_out = self.audio_embed(audio)
+                x = torch.cat([text, audio_out], dim=1)
+
+            x = self.norm_in(x)
+            v_first = None
+            for block in self.blocks:
+                x, v_first = block(x, v_first)
+            x = self.lmhead(self.norm_out(x))
+            print(x.shape)
+            
+            # 添加 softmax
+            last_vector = x[:, -1, :]
+            probabilities = F.softmax(last_vector, dim=-1)
+            token_id = torch.argmax(probabilities, dim=-1)
+            print(token_id.item())
+            
+            if token_id.item() == 8192:
+                print("ending with pad")
+                return torch.tensor(tokens).unsqueeze(0).to('cuda')
+
+            tokens.append(token_id.item())  # 转换为整数
+            audio = torch.tensor(tokens).unsqueeze(0).to('cuda')
+
+        return torch.tensor(tokens).unsqueeze(0).to('cuda')

@@ -6,6 +6,7 @@ import glob
 import wandb
 from datasets import load_dataset
 from accelerate import Accelerator
+import argparse
 
 from src.rwkv7 import RWKV7
 from src.dataset import MyDataset
@@ -27,18 +28,20 @@ def load_latest_checkpoint(model, checkpoint_dir):
     model.load_state_dict(torch.load(checkpoint_path))
     print(f"Loaded checkpoint: {checkpoint_path}")
 
-def initialize_model(checkpoint_dir):
+def initialize_model(checkpoint_dir, dim, n_blocks):
     """
     Initialize the RWKV7 model and load the latest checkpoint.
     
     Args:
         checkpoint_dir: Directory containing checkpoint files
+        dim: Dimension of the model
+        n_blocks: Number of blocks in the model
     
     Returns:
         The initialized model
     """
     # Initialize model
-    model = RWKV7(text_vocab=128, audio_vocab=8192 + 1, dim=128, n_blocks=5).cuda()
+    model = RWKV7(text_vocab=128, audio_vocab=8192 + 1, dim=dim, n_blocks=n_blocks).cuda()
     
     # Load latest checkpoint
     load_latest_checkpoint(model, checkpoint_dir)
@@ -81,7 +84,7 @@ def collate_fn(batch):
 
     return torch.stack(input_ids, dim=0), torch.stack(targets, dim=0), torch.stack(loss_masks, dim=0)
 
-def prepare_dataloader(batch_size=128):
+def prepare_dataloader(batch_size):
     """
     Prepare dataset and dataloader.
     
@@ -105,7 +108,7 @@ def prepare_dataloader(batch_size=128):
     
     return dataloader
 
-def train(model, dataloader, num_epochs=4000, output_dir="./checkpoints", learning_rate=5e-6):
+def train(model, dataloader, num_epochs, output_dir, learning_rate):
     """
     Train the model.
     
@@ -137,7 +140,7 @@ def train(model, dataloader, num_epochs=4000, output_dir="./checkpoints", learni
             loss_masks = loss_masks.to('cuda')
 
             # Forward pass
-            outputs = model(None, input_ids)
+            outputs = model(None,None, input_ids)
             
             # Calculate loss
             criterion = torch.nn.CrossEntropyLoss(reduction='none')
@@ -177,26 +180,31 @@ def save_checkpoint(model, output_dir, epoch):
     # Save current checkpoint
     checkpoint_path = os.path.join(output_dir, f"checkpoint_epoch_{epoch + 1}.pt")
     torch.save(model.state_dict(), checkpoint_path)
-    print(f"Saved checkpoint to {checkpoint_path}")
+    # print(f"Saved checkpoint to {checkpoint_path}")
 
 def main():
     """
     Main function to run the training process.
     """
+    parser = argparse.ArgumentParser(description="Train RWKV7 model")
+    parser.add_argument("--dim", type=int, default=128, help="Dimension of the model")
+    parser.add_argument("--n_blocks", type=int, default=5, help="Number of blocks in the model")
+    parser.add_argument("--num_epochs", type=int, default=4000, help="Number of training epochs")
+    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate for optimizer")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch size for training")
+    args = parser.parse_args()
+
     # Configuration
     checkpoint_dir = "./checkpoints"
-    batch_size = 128
-    num_epochs = 4000
-    learning_rate = 5e-6
     
     # Initialize model
-    model = initialize_model(checkpoint_dir)
+    model = initialize_model(checkpoint_dir, args.dim, args.n_blocks)
     
     # Prepare dataloader
-    dataloader = prepare_dataloader(batch_size)
+    dataloader = prepare_dataloader(args.batch_size)
     
     # Train model
-    train(model, dataloader, num_epochs, checkpoint_dir, learning_rate)
+    train(model, dataloader, args.num_epochs, checkpoint_dir, args.learning_rate)
 
 if __name__ == "__main__":
     main()
