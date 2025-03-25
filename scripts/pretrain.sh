@@ -1,12 +1,14 @@
 #3M
 # dim=128
 # blocks=5
-#11M
-dim=320
-blocks=5
+#10M
+# dim=320
+# blocks=5
+#12M
+dim=256
+blocks=12
 
-
-learning_rate=5e-6
+learning_rate=1e-5
 num_epochs=4000
 batch_size=128
 

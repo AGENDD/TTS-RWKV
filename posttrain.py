@@ -28,7 +28,7 @@ def load_latest_checkpoint(model, checkpoint_dir):
     model.load_state_dict(torch.load(checkpoint_path))
     print(f"Loaded checkpoint: {checkpoint_path}")
 
-def initialize_model(checkpoint_dir, dim, n_blocks):
+def initialize_model(checkpoint_dir, dim, n_blocks, device):
     """
     Initialize the RWKV7 model and load the latest checkpoint.
     
@@ -41,7 +41,7 @@ def initialize_model(checkpoint_dir, dim, n_blocks):
         The initialized model
     """
     # Initialize model
-    model = RWKV7(text_vocab=128, audio_vocab=8192 + 1, dim=dim, n_blocks=n_blocks).cuda()
+    model = RWKV7(text_vocab=128, audio_vocab=8192 + 1, dim=dim, n_blocks=n_blocks).to(device)
     
     # Load latest checkpoint
     load_latest_checkpoint(model, checkpoint_dir)
@@ -120,7 +120,7 @@ def prepare_dataloader(batch_size):
     
     return dataloader
 
-def train(model, dataloader, num_epochs, output_dir, learning_rate):
+def train(model, dataloader, num_epochs, output_dir, learning_rate, device):
     """
     Train the model.
     
@@ -148,11 +148,11 @@ def train(model, dataloader, num_epochs, output_dir, learning_rate):
         for batch in tqdm(dataloader, leave=False):
             text_input_ids, text_attention_mask, audio_input_ids, targets, loss_masks = batch
             
-            text_input_ids = text_input_ids.long().to('cuda')
-            text_attention_mask = text_attention_mask.to('cuda')
-            audio_input_ids = audio_input_ids.long().to('cuda')
-            targets = targets.long().to('cuda')
-            loss_masks = loss_masks.to('cuda')
+            text_input_ids = text_input_ids.long().to(device)
+            text_attention_mask = text_attention_mask.to(device)
+            audio_input_ids = audio_input_ids.long().to(device)
+            targets = targets.long().to(device)
+            loss_masks = loss_masks.to(device)
 
             # Forward pass
             outputs = model(text_input_ids, text_attention_mask, audio_input_ids)
@@ -212,9 +212,10 @@ def test():
     print(f"target:{target}")
     print(f"loss_mask:{loss_mask}")
     
-    model = initialize_model("./checkpoints")
-    output = model(text_input_ids.long().to('cuda'), text_attention_mask.to('cuda'), audio_input_ids.long().to('cuda'))
-    return 
+    model = initialize_model("./checkpoints",320, 5, 'cuda:3')
+    output = model(text_input_ids.long().to('cuda:3'), text_attention_mask.to('cuda:3'), audio_input_ids.long().to('cuda:3'))
+    print(f"output:{output.shape}")
+    return 0
 
 def main():
     """
@@ -230,14 +231,14 @@ def main():
 
     # Configuration
     checkpoint_dir = "./checkpoints"
-    
+    device = torch.device("cuda:0")
     # Initialize model
-    model = initialize_model(checkpoint_dir, args.dim, args.n_blocks)
+    model = initialize_model(checkpoint_dir, args.dim, args.n_blocks, device)
     
     # Prepare dataloader
     dataloader = prepare_dataloader(args.batch_size)
     # Train model
-    train(model, dataloader, args.num_epochs, checkpoint_dir, args.learning_rate)
+    train(model, dataloader, args.num_epochs, checkpoint_dir, args.learning_rate, device)
 
 if __name__ == "__main__":
     main()

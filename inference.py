@@ -2,16 +2,16 @@ import os
 from src.rwkv7 import RWKV7
 from src.text_tokenizer import TextTokenizer
 import torch
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+device = torch.device("cuda:3")
 
-
-model = RWKV7(text_vocab=128, audio_vocab=8192 + 1, dim=128, n_blocks=5).cuda()
+model = RWKV7(text_vocab=128, audio_vocab=8192 + 1, dim=256, n_blocks=12).to(device)
 tokenizer = TextTokenizer()
 config = "lucadellalib/focalcodec_12_5hz"
 codec = torch.hub.load(
     "lucadellalib/focalcodec", "focalcodec", config=config, force_reload=False
 )
-codec.eval().requires_grad_(False).to('cuda')
+codec.eval().requires_grad_(False).to(device)
 
 checkpoint_dir = './checkpoints'
 checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pt')]
@@ -29,10 +29,10 @@ while(True):
     text = str(input())
     print("Computing...")
     tokens = tokenizer.tokenize(text)
-    text_tensor = torch.tensor(tokens).unsqueeze(0).to('cuda')
+    text_tensor = torch.tensor(tokens).unsqueeze(0).to(device) # 1, seq, 
     print(f"text_tensor:{text_tensor}")
-    tokens = model.generate(None, text_tensor, 2000) #return a tensor
-    print(tokens.shape)
+    tokens = model.generate(None, text_tensor, 2000, device) #return a tensor
+    # print(tokens.shape)
     print(tokens)
     signal = codec.toks_to_sig(tokens).squeeze(0)
 

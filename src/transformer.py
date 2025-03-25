@@ -2,88 +2,79 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from fla.layers import RWKV7Attention  # type: ignore
-from fla.utils import device
 
-class TMix(nn.Module):
-    def __init__(self, dim, block_id, n_blocks):
+class PositionalEncoding(nn.Module):
+    def __init__(self, dim, max_len=5000):
         super().__init__()
-        self.rwkv7 = RWKV7Attention(
-            "chunk",
-            dim,
-            layer_idx=block_id
-        )
+        pe = torch.zeros(max_len, dim)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, dim, 2).float() * (-torch.log(torch.tensor(10000.0)) / dim))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_buffer('pe', pe)
 
-    def forward(self, x, v_first):
-        x_attn, _, past_key_values, v_first = self.rwkv7(x, v_first=v_first)
-        return x_attn, v_first
-
-class CMix(nn.Module):
-    def __init__(self, dim, hidden_dim, block_id, n_blocks):
-        super().__init__()
-        self.value1 = nn.Linear(dim, hidden_dim)
-        self.relu = nn.ReLU()
-        self.value2 = nn.Linear(hidden_dim, dim)
-    
     def forward(self, x):
-        x = self.relu(self.value1(x))
-        return self.value2(x)
+        return x + self.pe[:x.size(0), :]
 
-class RWKV7Block(nn.Module):
-    def __init__(self, dim, block_id, n_blocks):
+class TransformerBlock(nn.Module):
+    def __init__(self, dim, n_heads):
         super().__init__()
-        self.attn = TMix(dim, block_id, n_blocks)
-        self.mlp = CMix(dim, dim*2, block_id, n_blocks)
+        self.attn = nn.MultiheadAttention(dim, n_heads)
+        self.ff = nn.Sequential(
+            nn.Linear(dim, 2*dim),
+            nn.ReLU(),
+            nn.Linear(2*dim, dim)
+        )
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
 
-    def forward(self, x, v_first):
-        x_attn, v_first = self.attn(self.norm1(x), v_first=v_first)
-        x = x + x_attn
-        x = x + self.mlp(self.norm2(x))
-        return x, v_first
+    def forward(self, x):
+        norm_x = self.norm1(x)
+        attn_output, _ = self.attn(norm_x, norm_x, norm_x)
+        x = x + attn_output
+        x = self.norm2(x)
+        ff_output = self.ff(x)
+        x = x + ff_output
+        return x
 
-class RWKV7(nn.Module):
-    def __init__(self,
-            text_vocab,     # vocab size of text tokens
-            audio_vocab,    # vocab size of audio tokens, also the output token
-            dim, 
-            n_blocks: int):
+class TransformerModel(nn.Module):
+    def __init__(self, text_vocab, audio_vocab, dim, n_blocks, n_heads = 8):
         super().__init__()
-        
         self.text_embed = nn.Embedding(text_vocab, dim)
         self.audio_embed = nn.Embedding(audio_vocab, dim)
         
         self.blocks = nn.ModuleList([
-            RWKV7Block(dim, i, n_blocks)
-            for i in range(n_blocks)
+            TransformerBlock(dim, n_heads)
+            for _ in range(n_blocks)
         ])
+        
+        self.pos_encoder = PositionalEncoding(dim)
         self.lmhead = nn.Linear(dim, audio_vocab)
         self.norm_in = nn.LayerNorm(dim)
         self.norm_out = nn.LayerNorm(dim)
 
-    def forward(self, text,text_attention_mask, audio):
-        if(text is None and audio is not None):         #pretrain
+    def forward(self, text, text_attention_mask, audio):
+        
+        if text is None and audio is not None:  # pretrain
             audio = self.audio_embed(audio)
             x = audio
-        elif(text is not None and audio is not None):   #sft or inference
+        elif text is not None and audio is not None:  # sft or inference
             text = self.text_embed(text)
             audio = self.audio_embed(audio)
+
             
             text_list = []
             audio_list = []
             
-            # Iterate over the batch dimension
             for i in range(text.shape[0]):
-                # Mask the text based on text_attention_mask
                 masked_text = text[i][text_attention_mask[i] == 1]
                 text_list.append(masked_text)
-                # Get the corresponding audio segment
                 audio_segment = audio[i]
                 audio_list.append(audio_segment)
                 
             tensor_list = []
-            max_len = max([len(x)+len(y) for x, y in zip(text_list, audio_list)])
+            max_len = max([len(x) + len(y) for x, y in zip(text_list, audio_list)])
             
             for i in range(len(text_list)):
                 combine_tensor = torch.cat((text_list[i], audio_list[i]), dim=0)
@@ -92,20 +83,20 @@ class RWKV7(nn.Module):
                     combine_tensor = torch.cat((combine_tensor, padding), dim=0)
                 tensor_list.append(combine_tensor)
                     
-            x = torch.stack(tensor_list,dim=0)
+            x = torch.stack(tensor_list, dim=0)
             
-        elif(text is not None and audio is None):       #inference
+        elif text is not None and audio is None:  # inference
             x = self.text_embed(text)
             
+        x = self.pos_encoder(x)
+        
         x = self.norm_in(x)
-        v_first = None
         for block in self.blocks:
-            x, v_first = block(x, v_first)
+            x = block(x)
             
         return self.lmhead(self.norm_out(x))
     
     def generate(self, audio, text, MAX_LENGTH, device, temperature=1.0):
-
         tokens = []
         for i in range(MAX_LENGTH):
             text_out = self.text_embed(text)
@@ -115,12 +106,11 @@ class RWKV7(nn.Module):
                 audio_out = self.audio_embed(audio)
                 x = torch.cat([text_out, audio_out], dim=1)
 
+            x = self.pos_encoder(x)
             x = self.norm_in(x)
-            v_first = None
             for block in self.blocks:
-                x, v_first = block(x, v_first)
+                x = block(x)
             x = self.lmhead(self.norm_out(x))
-            # print(x.shape)
             
             last_vector = x[:, -1, :]
             probabilities = F.softmax(last_vector / temperature, dim=-1)
@@ -131,7 +121,7 @@ class RWKV7(nn.Module):
                 print("ending with pad")
                 return torch.tensor(tokens).unsqueeze(0).to(device)
 
-            tokens.append(token_id.item())  # 转换为整数
+            tokens.append(token_id.item())
             audio = torch.tensor(tokens).unsqueeze(0).to(device)
 
         return torch.tensor(tokens).unsqueeze(0).to(device)

@@ -10,6 +10,7 @@ import argparse
 
 from src.rwkv7 import RWKV7
 from src.dataset import MyDataset
+from src.transformer import TransformerModel
 
 def load_latest_checkpoint(model, checkpoint_dir):
     """
@@ -42,7 +43,7 @@ def initialize_model(checkpoint_dir, dim, n_blocks):
     """
     # Initialize model
     model = RWKV7(text_vocab=128, audio_vocab=8192 + 1, dim=dim, n_blocks=n_blocks).cuda()
-    
+    model = TransformerModel(text_vocab=128, audio_vocab=8192 + 1, dim=dim, n_blocks=n_blocks).cuda()
     # Load latest checkpoint
     load_latest_checkpoint(model, checkpoint_dir)
     
