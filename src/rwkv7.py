@@ -4,6 +4,7 @@ from torch import nn
 
 from fla.layers import RWKV7Attention  # type: ignore
 from fla.utils import device
+import torch.nn.init as init
 
 class TMix(nn.Module):
     def __init__(self, dim, block_id, n_blocks):
@@ -36,7 +37,6 @@ class RWKV7Block(nn.Module):
         self.mlp = CMix(dim, dim*2, block_id, n_blocks)
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
-
     def forward(self, x, v_first):
         x_attn, v_first = self.attn(self.norm1(x), v_first=v_first)
         x = x + x_attn
@@ -53,7 +53,7 @@ class RWKV7(nn.Module):
         
         self.text_embed = nn.Embedding(text_vocab, dim)
         self.audio_embed = nn.Embedding(audio_vocab, dim)
-        
+        self.dropout = nn.Dropout(p=0.3)
         self.blocks = nn.ModuleList([
             RWKV7Block(dim, i, n_blocks)
             for i in range(n_blocks)
@@ -73,6 +73,7 @@ class RWKV7(nn.Module):
             text_list = []
             audio_list = []
             
+            # 接下来这一步把text embed 和 audio embed 进行拼接。再次之前要把text embed右边的padding挖掉，凭借后在再audio embed的右边进行补全
             # Iterate over the batch dimension
             for i in range(text.shape[0]):
                 # Mask the text based on text_attention_mask
@@ -94,9 +95,10 @@ class RWKV7(nn.Module):
                     
             x = torch.stack(tensor_list,dim=0)
             
-        elif(text is not None and audio is None):       #inference
+        elif(text is not None and audio is None):       #不存在这个情况
             x = self.text_embed(text)
             
+        # x = self.dropout(x)
         x = self.norm_in(x)
         v_first = None
         for block in self.blocks:
@@ -135,3 +137,15 @@ class RWKV7(nn.Module):
             audio = torch.tensor(tokens).unsqueeze(0).to(device)
 
         return torch.tensor(tokens).unsqueeze(0).to(device)
+    
+    def initialize_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                init.kaiming_normal_(module.weight)
+                if module.bias is not None:
+                    init.constant_(module.bias, 0)
+            elif isinstance(module, nn.Embedding):
+                init.normal_(module.weight, mean=0, std=0.01)
+            elif isinstance(module, nn.LayerNorm):
+                init.constant_(module.weight, 1)
+                init.constant_(module.bias, 0)
