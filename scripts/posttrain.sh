@@ -8,9 +8,9 @@
 dim=256
 blocks=12
 
-learning_rate=5e-6
+learning_rate=5e-5
 num_epochs=4000
-batch_size=128
+batch_size=32
 
 export HF_ENDPOINT="https://hf-mirror.com" 
 python posttrain.py --dim $dim --n_blocks $blocks --learning_rate $learning_rate --num_epochs $num_epochs --batch_size $batch_size

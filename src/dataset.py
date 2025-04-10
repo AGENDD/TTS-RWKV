@@ -17,8 +17,12 @@ class MyDataset(Dataset):
         data = self.hf_dataset[idx]
             
         audio_token_list = data['audio_token']
-        text = data['normalized_text']
-                
+        
+        # text = data['normalized_text']
+        text = data['text_normalized']
+        # text = "["+data['speaker_id']+ "]"+data['text_normalized']
+        
+        
         if(self.train_type == 'sft'):
             text_token_list = self.text_tokenizer.tokenize(text)
             return text_token_list, audio_token_list

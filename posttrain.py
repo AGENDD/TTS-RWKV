@@ -11,6 +11,21 @@ import argparse
 from src.rwkv7 import RWKV7
 from src.dataset import MyDataset
 
+class L2Wrap(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, loss, y):
+        ctx.save_for_backward(y)
+        return loss
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        y = ctx.saved_tensors[0]
+        factor = 1e-4 / (y.shape[0] * y.shape[1])
+        maxx, ids = torch.max(y, -1, keepdim=True)
+        gy = torch.zeros_like(y)
+        gy.scatter_(-1, ids, maxx * factor)
+        return grad_output, gy
+
 def load_latest_checkpoint(model, checkpoint_dir):
     """
     Load the latest checkpoint for the model from the specified directory.
@@ -107,7 +122,8 @@ def prepare_dataloader(batch_size):
         DataLoader for training
     """
     # Load dataset
-    dataset = load_dataset("JerryAGENDD/JLSpeech_tokenized", cache_dir="../temp_datasets")['train']
+    # dataset = load_dataset("JerryAGENDD/JLSpeech_tokenized", cache_dir="../temp_datasets")['train']
+    dataset = load_dataset("JerryAGENDD/libritts_tokenized_460", cache_dir="../temp_datasets")['train']
     dataset = MyDataset(hf_dataset=dataset, train_type='sft')
    
     # Create dataloader
@@ -133,7 +149,7 @@ def train(model, dataloader, num_epochs, output_dir, learning_rate, device):
     """
     # Set up accelerator and optimizer
     accelerator = Accelerator()
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,weight_decay=1e-4)
     model, dataloader, optimizer = accelerator.prepare(model, dataloader, optimizer)
     
     # Initialize wandb
@@ -163,7 +179,8 @@ def train(model, dataloader, num_epochs, output_dir, learning_rate, device):
             # Apply loss masks
             loss = loss.view(targets.size()) * loss_masks
             loss = loss.sum() / loss_masks.sum()  # Calculate average loss
-
+            loss = L2Wrap.apply(loss, outputs)
+            
             # Log to wandb
             wandb.log({"loss": loss.item()})
             

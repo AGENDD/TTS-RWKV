@@ -12,6 +12,21 @@ from src.rwkv7 import RWKV7
 from src.dataset import MyDataset
 from src.transformer import TransformerModel
 
+class L2Wrap(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, loss, y):
+        ctx.save_for_backward(y)
+        return loss
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        y = ctx.saved_tensors[0]
+        factor = 1e-4 / (y.shape[0] * y.shape[1])
+        maxx, ids = torch.max(y, -1, keepdim=True)
+        gy = torch.zeros_like(y)
+        gy.scatter_(-1, ids, maxx * factor)
+        return grad_output, gy
+
 def load_latest_checkpoint(model, checkpoint_dir):
     """
     Load the latest checkpoint for the model from the specified directory.
@@ -122,7 +137,7 @@ def train(model, dataloader, num_epochs, output_dir, learning_rate):
     """
     # Set up accelerator and optimizer
     accelerator = Accelerator()
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,weight_decay=1e-4)
     model, dataloader, optimizer = accelerator.prepare(model, dataloader, optimizer)
     
     # Initialize wandb
@@ -149,7 +164,8 @@ def train(model, dataloader, num_epochs, output_dir, learning_rate):
             # Apply loss masks
             loss = loss.view(targets.size()) * loss_masks
             loss = loss.sum() / loss_masks.sum()  # Calculate average loss
-
+            loss = L2Wrap.apply(loss, outputs)
+            
             # Log to wandb
             wandb.log({"loss": loss.item()})
             

@@ -4,15 +4,32 @@ from tqdm import tqdm
 import os
 import glob
 import wandb
-from datasets import load_dataset
+from datasets import load_dataset,concatenate_datasets
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse
 
+# from src.rwkv7_fla import RWKV7
 from src.rwkv7 import RWKV7
 from src.dataset import MyDataset
 from src.transformer import TransformerModel
 
+
+class L2Wrap(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, loss, y):
+        ctx.save_for_backward(y)
+        return loss
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        y = ctx.saved_tensors[0]
+        factor = 1e-4 / (y.shape[0] * y.shape[1])
+        maxx, ids = torch.max(y, -1, keepdim=True)
+        gy = torch.zeros_like(y)
+        gy.scatter_(-1, ids, maxx * factor)
+        return grad_output, gy
+    
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
@@ -33,8 +50,8 @@ def load_latest_checkpoint(model, checkpoint_dir):
     print(f"Loaded checkpoint: {checkpoint_path}")
 
 def initialize_model(checkpoint_dir, dim, n_blocks, rank, world_size):
-    # model = RWKV7(text_vocab=128, audio_vocab=8192 + 1, dim=dim, n_blocks=n_blocks).to(rank)
-    model = TransformerModel(text_vocab=128, audio_vocab=8192 + 1, dim=dim, n_blocks=n_blocks).to(rank)
+    model = RWKV7(text_vocab=128, audio_vocab=8192 + 1, dim=dim, n_blocks=n_blocks).to(rank)
+    # model = TransformerModel(text_vocab=128, audio_vocab=8192 + 1, dim=dim, n_blocks=n_blocks).to(rank)
     
     if rank == 0:
         load_latest_checkpoint(model, checkpoint_dir)
@@ -45,6 +62,9 @@ def initialize_model(checkpoint_dir, dim, n_blocks, rank, world_size):
     for param in model.parameters():
         dist.broadcast(param.data.clone(), src=0)  # 使用 clone() 方法
     
+    # model= model.to(torch.bfloat16)
+    # model=  model.to(torch.half)
+    
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model total parameters: {total_params}")
@@ -54,6 +74,9 @@ def initialize_model(checkpoint_dir, dim, n_blocks, rank, world_size):
 def collate_fn(batch):
     padding_token = 8192
     max_length = max(len(seq) for seq in batch) - 1
+
+    chunck_length = ((max_length // 16) + 1) * 16 #每个张量的长度必须是16的倍数，需要chunck
+    
     input_ids, targets, loss_masks = [], [], []
     for seq in batch:
         input_seq = list(seq[:-1])
@@ -61,15 +84,31 @@ def collate_fn(batch):
         input_padding = [padding_token] * (max_length - len(input_seq))
         target_padding = [padding_token] * (max_length - len(target_seq))
         mask_padding = [0] * (max_length - len(input_seq))
-        input_ids.append(torch.tensor(input_seq + input_padding, dtype=torch.long))
-        targets.append(torch.tensor(target_seq + target_padding, dtype=torch.long))
-        loss_masks.append(torch.tensor([1] * len(input_seq) + mask_padding, dtype=torch.long))
+        input_ids.append(torch.tensor(input_seq + input_padding + [padding_token] * (chunck_length - max_length), dtype=torch.long))
+        targets.append(torch.tensor(target_seq + target_padding + [padding_token] * (chunck_length - max_length), dtype=torch.long))
+        loss_masks.append(torch.tensor([1] * len(input_seq) + mask_padding + [0] * (chunck_length - max_length), dtype=torch.long))
+        
+        # input_ids.append(torch.tensor(input_seq + input_padding, dtype=torch.long))
+        # targets.append(torch.tensor(target_seq + target_padding, dtype=torch.long))
+        # loss_masks.append(torch.tensor([1] * len(input_seq) + mask_padding, dtype=torch.long))
+        
     return torch.stack(input_ids, dim=0), torch.stack(targets, dim=0), torch.stack(loss_masks, dim=0)
 
 def prepare_dataloader(batch_size, rank, world_size):
-    dataset = load_dataset("JerryAGENDD/JLSpeech_tokenized", cache_dir="../temp_datasets")['train']
+    # dataset = load_dataset("JerryAGENDD/JLSpeech_tokenized", cache_dir="../temp_datasets")['train']
+    
+    # dataset = load_dataset("JerryAGENDD/JLSpeech_tokenized", cache_dir="../temp_datasets")['train']
+    # dataset = dataset.remove_columns(['text', 'audio'])
+    # dataset = dataset.rename_column("normalized_text", "text_normalized")
+    
+    dataset2 = load_dataset("JerryAGENDD/libritts_tokenized_960", cache_dir="../temp_datasets")['train']
+    dataset = dataset2.remove_columns(['text_original', 'speaker_id'])
+    
+    # dataset = concatenate_datasets([dataset, dataset2]).shuffle()
+    
+    
     dataset = MyDataset(hf_dataset=dataset, train_type='pretrain')
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank,shuffle=True)
     dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, collate_fn=collate_fn)
     return dataloader
 
@@ -77,10 +116,12 @@ def train(rank, world_size, args):
     setup(rank, world_size)
     model = initialize_model(args.checkpoint_dir, args.dim, args.n_blocks, rank,world_size)
     dataloader = prepare_dataloader(args.batch_size, rank, world_size)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate,weight_decay=1e-4)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
-    
     if rank == 0:
         wandb.init(project="TTS")
+    
+    logging_parameter = True
     
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     model.train()
@@ -101,12 +142,21 @@ def train(rank, world_size, args):
             loss = criterion(outputs.view(-1, outputs.size(-1)), targets.view(-1))
             loss = loss.view(targets.size()) * loss_masks
             loss = loss.sum() / loss_masks.sum()
+            loss = L2Wrap.apply(loss, outputs)
             
             if rank == 0:
                 wandb.log({"loss": loss.item()})
             
             optimizer.zero_grad()
             loss.backward()
+            
+            if(logging_parameter and rank == 0):
+                for name, param in model.named_parameters():
+                    if param.grad is None:
+                        print(f"Parameter {name} did not receive gradient")
+
+                logging_parameter = False
+            
             optimizer.step()
         
         if rank == 0:

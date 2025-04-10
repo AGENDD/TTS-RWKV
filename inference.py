@@ -3,9 +3,10 @@ from src.rwkv7 import RWKV7
 from src.text_tokenizer import TextTokenizer
 import torch
 # os.environ["CUDA_VISIBLE_DEVICES"] = "3"
-device = torch.device("cuda:3")
+device = torch.device("cuda:2")
 
-model = RWKV7(text_vocab=128, audio_vocab=8192 + 1, dim=256, n_blocks=12).to(device)
+# model = RWKV7(text_vocab=128, audio_vocab=8192 + 1, dim=512, n_blocks=12).to(device)
+model = RWKV7(text_vocab=128, audio_vocab=8192 + 1, dim=1024, n_blocks=12).to(device)
 tokenizer = TextTokenizer()
 config = "lucadellalib/focalcodec_12_5hz"
 codec = torch.hub.load(
@@ -22,6 +23,10 @@ latest_checkpoint = max(checkpoint_files, key=lambda x: os.path.getctime(os.path
 checkpoint_path = os.path.join(checkpoint_dir, latest_checkpoint)
 model.load_state_dict(torch.load(checkpoint_path))
 print(f"Loaded checkpoint: {checkpoint_path}")
+
+
+
+
 
 MAX_LENGTH = 2000
 print("Start")
