@@ -127,7 +127,8 @@ class RWKV_Tmix_x070(MyModule):
         k = k * (1 + (a-1) * self.k_a)
 
         x = RWKV7_OP(r, w, k, v, -kk, kk*a)
-        x = self.ln_x(x.view(B * T, C)).view(B, T, C)
+        x = x.contiguous()
+        x = self.ln_x(x.view(B * T, C)).view(B, T, C) #修改
         
         x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
         x = self.output(x * g)
@@ -149,9 +150,10 @@ class RWKV_CMix_x070(MyModule):
     @MyFunction
     def forward(self, x):
         xx = self.time_shift(x) - x
-        
+        torch.cuda.synchronize()
         k = x + xx * self.x_k
         k = torch.relu(self.key(k)) ** 2
+        torch.cuda.synchronize()
         return self.value(k)
 
 class Block(MyModule):
@@ -248,3 +250,43 @@ class RWKV7(nn.Module):
         x = self.head(x)
 
         return x
+    
+    def generate(self, audio, text, MAX_LENGTH, device, temperature=1.0):
+
+        tokens = []
+        for i in range(MAX_LENGTH):
+            text_out = self.text_embed(text)
+            if audio is None:
+                x = text_out
+            else:
+                audio_out = self.audio_embed(audio)
+                x = torch.cat([text_out, audio_out], dim=1)
+
+            x = x.contiguous()
+            
+            x = self.ln_in(x)
+            v_first = torch.empty_like(x).to(device).to(torch.float32)
+            # v_first = None
+            for block in self.blocks:
+                x, v_first = block(x, v_first)
+            
+            x = self.ln_out(x)
+            x = self.head(x)
+            print(x.shape)
+            
+            # x = self.forward(text,torch.ones(text.size()).to(device), audio)
+            
+            
+            last_vector = x[:, -1, :]
+            probabilities = F.softmax(last_vector / temperature, dim=-1)
+            token_id = torch.argmax(probabilities, dim=-1)
+            print(token_id.item())
+            
+            if token_id.item() == 8192:
+                print("ending with pad")
+                return torch.tensor(tokens).unsqueeze(0).to(device)
+
+            tokens.append(token_id.item())  # 转换为整数
+            audio = torch.tensor(tokens).unsqueeze(0).to(device)
+
+        return torch.tensor(tokens).unsqueeze(0).to(device)
