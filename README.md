@@ -15,7 +15,7 @@ This repository primarily explores the use of Focal Codec to convert between spe
 
 ## Demonstration
 
-Here shows some generated samples:
+Here shows some generated samples with prompt speech provided:
 
 
 
