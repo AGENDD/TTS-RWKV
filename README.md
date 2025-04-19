@@ -12,3 +12,13 @@ This repository primarily explores the use of Focal Codec to convert between spe
 - [x] Conducted experiments based on the public TTS dataset (LibriTTS), achieving remarkable results with 103M parameters.
 - [x] Efficiently achieved voice cloning for speech generation by inserting prompt audio tokens after text instructions.
 - [ ] Train guide, Inference guide and trained weights is coming soon.
+
+## Demonstration
+
+Here shows some generated samples:
+
+
+
+https://github.com/user-attachments/assets/7a6ba041-3cb2-45b0-9cdf-a5bb161e4e2d
+
+
